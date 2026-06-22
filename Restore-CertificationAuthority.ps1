@@ -208,9 +208,9 @@ try {
 
     $regFile = Join-Path $BackupFolder 'CertSvc-Configuration.reg'
     $hasConfig = Test-Path -LiteralPath $regFile
-    $p12 = Get-ChildItem -LiteralPath $BackupFolder -Recurse -File -Filter '*.p12' -ErrorAction SilentlyContinue
-    $dbFiles = Get-ChildItem -LiteralPath $BackupFolder -Recurse -File -ErrorAction SilentlyContinue |
-        Where-Object { $_.Extension -in '.edb', '.dat' }
+    $p12 = @(Get-ChildItem -LiteralPath $BackupFolder -Recurse -File -Filter '*.p12' -ErrorAction SilentlyContinue)
+    $dbFiles = @(Get-ChildItem -LiteralPath $BackupFolder -Recurse -File -ErrorAction SilentlyContinue |
+        Where-Object { $_.Extension -in '.edb', '.dat' })
 
     if (-not $SkipConfiguration -and -not $hasConfig) {
         Write-Log -Message "CertSvc-Configuration.reg not found in backup; configuration will NOT be imported." -Level Warning -EventId 1001
