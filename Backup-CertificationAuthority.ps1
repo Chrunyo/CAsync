@@ -289,8 +289,8 @@ try {
     if (-not $produced) {
         throw "certutil reported success but the backup folder is empty: $targetDir"
     }
-    $dbFiles  = $produced | Where-Object { $_.Extension -in '.edb', '.dat' }
-    $p12Files = $produced | Where-Object { $_.Extension -eq '.p12' }
+    $dbFiles  = @($produced | Where-Object { $_.Extension -in '.edb', '.dat' })
+    $p12Files = @($produced | Where-Object { $_.Extension -eq '.p12' })
     Write-Log -Message ("Database backup files: {0}; private-key (.p12) files: {1}." -f $dbFiles.Count, $p12Files.Count)
     if ($p12Files.Count -eq 0) {
         Write-Log -Message "No .p12 (private key) file was produced. Verify the account has key backup rights." -Level Warning -EventId 1001
@@ -319,9 +319,9 @@ try {
 
     # --- 3) Retention cleanup -------------------------------------------------
     if ($RetentionCount -gt 0) {
-        $allBackups = Get-ChildItem -LiteralPath $BackupRoot -Directory -ErrorAction SilentlyContinue |
+        $allBackups = @(Get-ChildItem -LiteralPath $BackupRoot -Directory -ErrorAction SilentlyContinue |
             Where-Object { $_.Name -like 'CABackup_*' } |
-            Sort-Object -Property Name -Descending
+            Sort-Object -Property Name -Descending)
 
         if ($allBackups.Count -gt $RetentionCount) {
             $toRemove = $allBackups | Select-Object -Skip $RetentionCount
