@@ -10,40 +10,57 @@
     timestamped subfolder under the supplied backup root. Each run produces an
     independent, self-contained backup set containing:
 
-      * The CA database (all issued/revoked/pending requests and CA log files)
-        and the CA certificate + private key, exported by 'certutil.exe -backup'
-        into a password-protected PKCS#12 (.p12) file.
+      * The CA database (all issued/revoked/pending requests and CA log files).
+        Backed up by 'certutil.exe -backupDB' by default, or, when
+        -ExportPrivateKey is supplied, by 'certutil.exe -backup' which ALSO
+        exports the CA certificate + private key into a password-protected
+        PKCS#12 (.p12) file.
       * The CA configuration, exported from the registry key
         HKLM\SYSTEM\CurrentControlSet\Services\CertSvc\Configuration
-        (which 'certutil -backup' does NOT include) so the CA can be fully
+        (which certutil backup does NOT include) so the CA can be fully
         reconstructed on a clean host.
       * A human-readable dump of the CA registry configuration for reference.
 
     'certutil.exe' is used as the backup engine, as recommended for AD CS.
-    A full 'certutil -backup' requires the target directory to be empty, which
-    is guaranteed here because a brand-new subfolder is created on every run.
+    A certutil backup requires the target directory to be empty, which is
+    guaranteed here because a brand-new subfolder is created on every run.
+
+    The export of the CA certificate + private key (PKCS#12) is OPTIONAL and is
+    controlled by the -ExportPrivateKey switch. By default the script performs a
+    database-only backup, which needs no password. Exporting the private key is
+    security-sensitive: it produces a .p12 containing the CA private key and
+    therefore requires a protecting password.
 
     All activity is logged to a rolling text log file and to the Windows
     Application event log (source 'CABackup'), making it suitable for running
     unattended as a Windows Scheduled Task.
 
-    The PKCS#12 private-key password must be supplied. For unattended scheduled
-    execution, store it once with New-CABackupCredential.ps1 (DPAPI-protected,
-    bound to the account that will run the task) and pass it via -PasswordPath.
+    When -ExportPrivateKey is used, the PKCS#12 private-key password must be
+    supplied. For unattended scheduled execution, store it once with
+    New-CABackupCredential.ps1 (DPAPI-protected, bound to the account that will
+    run the task) and pass it via -PasswordPath.
 
 .PARAMETER BackupRoot
     Root directory under which a new timestamped backup subfolder is created on
     every run (e.g. C:\CABackups\CABackup_20260622_143000).
 
+.PARAMETER ExportPrivateKey
+    Pass to additionally export the CA certificate and private key into a
+    password-protected PKCS#12 (.p12) file ('certutil -backup'). When this switch
+    is supplied a password is required (via -Password or -PasswordPath). When
+    omitted (the default), only the CA database is backed up ('certutil -backupDB')
+    and no password is needed.
+
 .PARAMETER Password
     The password used to protect the exported private key (PKCS#12). Supply as a
-    SecureString. Mutually exclusive with -PasswordPath. Mainly for interactive
-    use.
+    SecureString. Only relevant with -ExportPrivateKey. Mutually exclusive with
+    -PasswordPath. Mainly for interactive use.
 
 .PARAMETER PasswordPath
     Path to a DPAPI-protected password file created with New-CABackupCredential.ps1.
-    Use this for unattended/scheduled execution. The file can only be read by the
-    same Windows account and machine that created it.
+    Only relevant with -ExportPrivateKey. Use this for unattended/scheduled
+    execution. The file can only be read by the same Windows account and machine
+    that created it.
 
 .PARAMETER LogDirectory
     Directory for the text log file. Defaults to a 'Logs' subfolder under
@@ -61,16 +78,23 @@
     truncate the logs after a successful full backup.
 
 .EXAMPLE
-    .\Backup-CertificationAuthority.ps1 -BackupRoot 'D:\CABackups' -PasswordPath 'C:\CABackup\pfx.cred'
+    .\Backup-CertificationAuthority.ps1 -BackupRoot 'D:\CABackups'
 
-    Unattended full backup using a stored DPAPI password file. Intended form for
-    a scheduled task.
+    Unattended database-only backup. No password required. Intended form for a
+    scheduled task when the private key is backed up separately / already secured.
+
+.EXAMPLE
+    .\Backup-CertificationAuthority.ps1 -BackupRoot 'D:\CABackups' -ExportPrivateKey -PasswordPath 'C:\CABackup\pfx.cred'
+
+    Unattended full backup (database + certificate + private key) using a stored
+    DPAPI password file. Intended form for a scheduled task.
 
 .EXAMPLE
     $pw = Read-Host -AsSecureString 'PFX password'
-    .\Backup-CertificationAuthority.ps1 -BackupRoot 'D:\CABackups' -Password $pw -RetentionCount 14
+    .\Backup-CertificationAuthority.ps1 -BackupRoot 'D:\CABackups' -ExportPrivateKey -Password $pw -RetentionCount 14
 
-    Interactive backup keeping only the 14 most recent backup sets.
+    Interactive full backup (including private key) keeping only the 14 most
+    recent backup sets.
 
 .NOTES
     Must run elevated (Administrator) and on the CA host itself, under an account
@@ -84,11 +108,14 @@ param(
     [ValidateNotNullOrEmpty()]
     [string]$BackupRoot,
 
-    [Parameter(Mandatory, ParameterSetName = 'SecurePassword')]
+    [Parameter()]
+    [switch]$ExportPrivateKey,
+
+    [Parameter(ParameterSetName = 'SecurePassword')]
     [ValidateNotNull()]
     [securestring]$Password,
 
-    [Parameter(Mandatory, ParameterSetName = 'StoredPassword')]
+    [Parameter(ParameterSetName = 'StoredPassword')]
     [ValidateNotNullOrEmpty()]
     [string]$PasswordPath,
 
@@ -228,23 +255,35 @@ try {
     if ($caName) { Write-Log -Message "Target CA common name: $caName" }
     else { Write-Log -Message "Could not determine CA common name; continuing." -Level Warning -EventId 1001 }
 
-    # --- Resolve the PKCS#12 password ----------------------------------------
-    if ($PSCmdlet.ParameterSetName -eq 'StoredPassword') {
-        if (-not (Test-Path -LiteralPath $PasswordPath)) {
-            throw "Password file not found: $PasswordPath"
+    # --- Resolve the PKCS#12 password (only when exporting the private key) ---
+    if ($ExportPrivateKey) {
+        if ($PSCmdlet.ParameterSetName -eq 'SecurePassword') {
+            $plainPassword = ConvertTo-PlainText -Secure $Password
         }
-        $cred = Import-Clixml -LiteralPath $PasswordPath
-        if ($cred -isnot [securestring]) {
-            throw "Password file '$PasswordPath' did not contain a SecureString. Recreate it with New-CABackupCredential.ps1."
+        elseif ($PasswordPath) {
+            if (-not (Test-Path -LiteralPath $PasswordPath)) {
+                throw "Password file not found: $PasswordPath"
+            }
+            $cred = Import-Clixml -LiteralPath $PasswordPath
+            if ($cred -isnot [securestring]) {
+                throw "Password file '$PasswordPath' did not contain a SecureString. Recreate it with New-CABackupCredential.ps1."
+            }
+            $plainPassword = ConvertTo-PlainText -Secure $cred
         }
-        $plainPassword = ConvertTo-PlainText -Secure $cred
+        else {
+            throw "-ExportPrivateKey requires a password. Supply -Password or -PasswordPath."
+        }
+
+        if ([string]::IsNullOrEmpty($plainPassword)) {
+            throw "The private-key (PKCS#12) password resolved to an empty value."
+        }
+        Write-Log -Message "Private-key export (PKCS#12) is ENABLED for this backup."
     }
     else {
-        $plainPassword = ConvertTo-PlainText -Secure $Password
-    }
-
-    if ([string]::IsNullOrEmpty($plainPassword)) {
-        throw "The private-key (PKCS#12) password resolved to an empty value."
+        if ($Password -or $PasswordPath) {
+            Write-Log -Message "A password was supplied but -ExportPrivateKey was not; performing a database-only backup and ignoring the password." -Level Warning -EventId 1001
+        }
+        Write-Log -Message "Private-key export is disabled; performing a database-only backup (no private key)."
     }
 
     # --- Create the new, empty target subfolder -------------------------------
@@ -266,12 +305,22 @@ try {
     New-Item -ItemType Directory -Path $targetDir -Force | Out-Null
     Write-Log -Message "Created backup folder: $targetDir"
 
-    # --- 1) Full CA backup (database + certificate + private key) -------------
-    # certutil syntax: certutil [-f] [-p Password] -backup BackupDirectory [KeepLog]
-    $certutilArgs = @('-f', '-p', $plainPassword, '-backup', $targetDir)
+    # --- 1) CA backup ---------------------------------------------------------
+    # With -ExportPrivateKey: full backup (database + certificate + private key)
+    #   certutil [-f] [-p Password] -backup   BackupDirectory [KeepLog]
+    # Without:               database-only backup (no certificate/private key)
+    #   certutil [-f]         -backupDB BackupDirectory [KeepLog]
+    if ($ExportPrivateKey) {
+        $certutilArgs = @('-f', '-p', $plainPassword, '-backup', $targetDir)
+        $backupKind   = 'full backup (database + private key)'
+    }
+    else {
+        $certutilArgs = @('-f', '-backupDB', $targetDir)
+        $backupKind   = 'database-only backup'
+    }
     if ($KeepDatabaseLog) { $certutilArgs += 'KeepLog' }
 
-    Write-Log -Message "Running certutil full backup into '$targetDir'..."
+    Write-Log -Message "Running certutil $backupKind into '$targetDir'..."
     $backupOutput = & certutil.exe @certutilArgs 2>&1
     $backupCode   = $LASTEXITCODE
 
@@ -281,7 +330,7 @@ try {
     }
 
     if ($backupCode -ne 0) {
-        throw "certutil -backup failed with exit code $backupCode."
+        throw "certutil backup failed with exit code $backupCode."
     }
 
     # Verify the backup actually produced files.
@@ -292,8 +341,8 @@ try {
     $dbFiles  = @($produced | Where-Object { $_.Extension -in '.edb', '.dat' })
     $p12Files = @($produced | Where-Object { $_.Extension -eq '.p12' })
     Write-Log -Message ("Database backup files: {0}; private-key (.p12) files: {1}." -f $dbFiles.Count, $p12Files.Count)
-    if ($p12Files.Count -eq 0) {
-        Write-Log -Message "No .p12 (private key) file was produced. Verify the account has key backup rights." -Level Warning -EventId 1001
+    if ($ExportPrivateKey -and $p12Files.Count -eq 0) {
+        Write-Log -Message "No .p12 (private key) file was produced despite -ExportPrivateKey. Verify the account has key backup rights." -Level Warning -EventId 1001
     }
 
     # --- 2) Configuration data (registry export) ------------------------------
