@@ -8,19 +8,36 @@ log.
 ## What gets backed up
 
 Each run creates a **new timestamped subfolder** (`CABackup_yyyyMMdd_HHmmss`)
-under the backup root, so every backup is independent and self-contained. A full
-`certutil -backup` requires an empty target directory — using a fresh subfolder
+under the backup root, so every backup is independent and self-contained. A
+`certutil` backup requires an empty target directory — using a fresh subfolder
 each time guarantees that.
 
 | Item | Mechanism | File(s) in the backup folder |
 |------|-----------|------------------------------|
-| CA database (all requests: issued, revoked, pending, failed) + DB logs | `certutil -backup` | `*.edb` / `*.dat`, `DataBase\` |
-| CA certificate **and private key pair** | `certutil -backup` (PKCS#12) | `*.p12` |
+| CA database (all requests: issued, revoked, pending, failed) + DB logs | `certutil -backupDB` (or `-backup`) | `*.edb` / `*.dat`, `DataBase\` |
+| CA certificate **and private key pair** *(only with `-ExportPrivateKey`)* | `certutil -backup` (PKCS#12) | `*.p12` |
 | CA **configuration data** | registry export (`reg export`) | `CertSvc-Configuration.reg` |
 | Human-readable config (reference) | `certutil -getreg CA` | `CertSvc-Configuration.txt` |
 
-> `certutil -backup` does **not** include the CA configuration registry hive, so
+> The certutil backup does **not** include the CA configuration registry hive, so
 > it is exported separately. Both are needed to rebuild a CA on a clean host.
+
+### Private-key export is optional (`-ExportPrivateKey`)
+
+By default the backup script performs a **database-only** backup
+(`certutil -backupDB`) and needs **no password**. Pass **`-ExportPrivateKey`** to
+additionally export the CA certificate + private key into a password-protected
+PKCS#12 (`.p12`) via `certutil -backup`; in that mode a password is required
+(supply `-Password` or `-PasswordPath`).
+
+| Mode | Switch | certutil | Produces `.p12` | Password |
+|------|--------|----------|-----------------|----------|
+| Database-only (default) | *(none)* | `-backupDB` | no | not required |
+| Full (DB + private key) | `-ExportPrivateKey` | `-backup` | yes | **required** |
+
+The scheduled task registered by `Register-CABackupScheduledTask.ps1` runs in
+**full** mode (it always passes `-ExportPrivateKey` together with the stored
+`-PasswordPath`).
 
 ## Files
 
@@ -30,6 +47,7 @@ each time guarantees that.
 | `Restore-CertificationAuthority.ps1` | Restores a CA from a backup set (config + database + key). |
 | `New-CABackupCredential.ps1` | Stores the PKCS#12 private-key password as a DPAPI-protected file for unattended use. |
 | `Register-CABackupScheduledTask.ps1` | Registers the daily scheduled task. |
+| `New-CAConfigurationReport.ps1` | Generates a self-contained HTML report of the CA configuration (server, services, registry) from the backup set and the live server. |
 
 ## Requirements
 
@@ -96,12 +114,18 @@ Get-WinEvent -FilterHashtable @{ LogName='Application'; ProviderName='CABackup';
 ## Manual / interactive run
 
 ```powershell
-# Prompt for the password instead of using a stored file:
+# Database-only backup (default) — no password needed:
+.\Backup-CertificationAuthority.ps1 -BackupRoot 'D:\CABackups'
+
+# Full backup including the private key; prompt for the password:
 $pw = Read-Host -AsSecureString 'PFX password'
-.\Backup-CertificationAuthority.ps1 -BackupRoot 'D:\CABackups' -Password $pw
+.\Backup-CertificationAuthority.ps1 -BackupRoot 'D:\CABackups' -ExportPrivateKey -Password $pw
+
+# Full backup using a stored DPAPI password file:
+.\Backup-CertificationAuthority.ps1 -BackupRoot 'D:\CABackups' -ExportPrivateKey -PasswordPath 'C:\CABackup\pfx.cred'
 
 # Preview only (no changes):
-.\Backup-CertificationAuthority.ps1 -BackupRoot 'D:\CABackups' -PasswordPath 'C:\CABackup\pfx.cred' -WhatIf
+.\Backup-CertificationAuthority.ps1 -BackupRoot 'D:\CABackups' -ExportPrivateKey -PasswordPath 'C:\CABackup\pfx.cred' -WhatIf
 ```
 
 ## Restore
@@ -129,11 +153,48 @@ Useful switches: `-SkipConfiguration`, `-SkipDatabaseAndKey`, `-NoServiceStart`,
 
 Always validate restores in a lab before relying on them.
 
+## Configuration report
+
+`New-CAConfigurationReport.ps1` produces a single, self-contained **HTML report**
+documenting the CA for operational, audit and disaster-recovery reference. It
+combines two sources:
+
+- **Backup data** — a `CABackup_*` folder: the exported configuration registry
+  (`CertSvc-Configuration.reg`), its human-readable dump
+  (`CertSvc-Configuration.txt`, embedded verbatim), and the file inventory
+  (database, `.p12`, sizes/dates). This captures the CA state *as backed up*.
+- **Live server** (when run on the CA host) — Windows identification (name,
+  domain, OS, build, hardware, network), the `CertSvc` service and its related
+  services, AD CS role features, CA identity/type, signing certificate,
+  CRL/AIA/CDP publishing, crypto provider, certificate templates, and a **full
+  structured dump of the CA registry** (`...\CertSvc\Configuration`).
+
+The script is **read-only** (it makes no changes and never touches the private
+key, so no password is needed) and degrades gracefully — any unavailable source
+is marked as such instead of failing the whole report.
+
+```powershell
+# Newest backup set + live CA config; report written into that backup folder:
+.\New-CAConfigurationReport.ps1 -BackupRoot 'D:\CABackups'
+
+# A specific backup set plus live data, to a chosen path:
+.\New-CAConfigurationReport.ps1 -BackupFolder 'D:\CABackups\CABackup_20260622_143000' `
+    -OutputPath 'C:\Temp\CA-Report.html'
+
+# From an archived backup only (e.g. on an admin workstation), no live queries:
+.\New-CAConfigurationReport.ps1 -BackupFolder 'D:\Archive\CABackup_20260101_020000' -SkipLiveData
+```
+
+Run **elevated on the CA host** for the richest live output. The default output
+file is `CA-Configuration-Report_<host>_<timestamp>.html` inside the backup
+folder (or the current directory when no backup is given).
+
 ## Notes & trade-offs
 
-- The PKCS#12 password is passed to `certutil` via `-p`. It is never written to
-  the logs, and the in-memory plaintext is cleared after use. On a privileged CA
-  host this is the standard, reliable approach.
-- The CA service does **not** need to be stopped for a full backup.
+- With `-ExportPrivateKey`, the PKCS#12 password is passed to `certutil` via
+  `-p`. It is never written to the logs, and the in-memory plaintext is cleared
+  after use. On a privileged CA host this is the standard, reliable approach.
+  Without the switch no password is used at all.
+- The CA service does **not** need to be stopped for a backup (database-only or full).
 - Retention (`-RetentionCount`) prunes oldest `CABackup_*` folders only after a
   successful backup. Default `0` keeps everything.
