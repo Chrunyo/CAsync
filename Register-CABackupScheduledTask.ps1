@@ -91,6 +91,7 @@ $psArgs = @(
     '-ExecutionPolicy', 'Bypass'
     '-File', "`"$ScriptPath`""
     '-BackupRoot', "`"$BackupRoot`""
+    '-ExportPrivateKey'
     '-PasswordPath', "`"$PasswordPath`""
 )
 if ($RetentionCount -gt 0) { $psArgs += @('-RetentionCount', $RetentionCount) }
